@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "@go-ui/core": "^1.37.6"
+  }
+}
