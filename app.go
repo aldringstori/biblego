@@ -2,126 +2,127 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
-	"log"
-	"strings"
-
+	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
+	"github.com/rs/cors"
+	"log"
+	"net/http"
+	"os"
 )
 
 var db *sql.DB
 
-func main() {
-	// Connect to the database
+func init() {
+	if err := godotenv.Load(); err != nil {
+		log.Fatal("Error loading .env file")
+	}
+	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		os.Getenv("DB_HOST"),
+		os.Getenv("DB_PORT"),
+		os.Getenv("DB_USER"),
+		os.Getenv("DB_PASSWORD"),
+		os.Getenv("DB_NAME"))
 	var err error
-	db, err = sql.Open("postgres", "postgres://root:scribe@localhost/scribe?sslmode=disable")
+	db, err = sql.Open("postgres", connStr) // Initialize the variable here
 	if err != nil {
-		log.Fatal("Failed to connect to database:", err)
+		log.Fatal(err)
 	}
-	defer db.Close()
+	if err = db.Ping(); err != nil {
+		log.Fatal(err)
+	}
+	log.Println("Successfully connected to the database")
+}
 
-	// Test the connection
-	err = db.Ping()
-	if err != nil {
-		log.Fatal("Failed to ping database:", err)
+func main() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/verse", handleVerseRequest)
+	mux.HandleFunc("/api/books", handleBooksRequest)
+
+	c := cors.New(cors.Options{
+		AllowedOrigins: []string{"*"},
+		AllowedMethods: []string{"GET", "POST", "OPTIONS"},
+		Debug:          true, // Enable CORS logging
+	})
+
+	handler := c.Handler(mux)
+	apiPort := os.Getenv("API_PORT")
+	fmt.Printf("API server is running on http://0.0.0.0:%s and http://[::]:%s\n", apiPort, apiPort)
+
+	log.Fatal(http.ListenAndServe("0.0.0.0:"+apiPort, handler))
+}
+
+func handleVerseRequest(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Received verse request from %s: %s", r.RemoteAddr, r.URL.String())
+	version := r.URL.Query().Get("version")
+	book := r.URL.Query().Get("book")
+	chapter := r.URL.Query().Get("chapter")
+	verse := r.URL.Query().Get("verse")
+	log.Printf("Params: version=%s, book=%s, chapter=%s, verse=%s", version, book, chapter, verse)
+
+	if version == "" || book == "" || chapter == "" || verse == "" {
+		log.Println("Missing required parameters")
+		http.Error(w, "Missing required parameters", http.StatusBadRequest)
+		return
 	}
 
-	fmt.Println("Successfully connected to the database")
+	var text string
+	err := db.QueryRow("SELECT text FROM bible_verses WHERE bible_version = $1 AND book = $2 AND chapter = $3 AND verse = $4",
+		version, book, chapter, verse).Scan(&text)
+	if err == sql.ErrNoRows {
+		log.Printf("Verse not found: %s %s:%s", book, chapter, verse)
+		http.Error(w, "Verse not found", http.StatusNotFound)
+		return
+	} else if err != nil {
+		log.Printf("Database error: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
 
-	for {
-		books, err := getAvailableBooks()
-		if err != nil {
-			log.Printf("Failed to get available books: %v", err)
-			return
-		}
-
-		fmt.Println("\nBible NASB CLI")
-		for i, book := range books {
-			fmt.Printf("%d. %s\n", i+1, book)
-		}
-		fmt.Printf("%d. Exit\n", len(books)+1)
-		fmt.Print("Choose a book: ")
-
-		var choice int
-		fmt.Scan(&choice)
-
-		if choice == len(books)+1 {
-			fmt.Println("Goodbye!")
-			return
-		}
-
-		if choice < 1 || choice > len(books) {
-			fmt.Println("Invalid choice, please try again.")
-			continue
-		}
-
-		displayBook(books[choice-1])
+	response := struct {
+		Version string `json:"version"`
+		Book    string `json:"book"`
+		Chapter string `json:"chapter"`
+		Verse   string `json:"verse"`
+		Text    string `json:"text"`
+	}{
+		Version: version,
+		Book:    book,
+		Chapter: chapter,
+		Verse:   verse,
+		Text:    text,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		log.Printf("Error encoding response: %v", err)
+	} else {
+		log.Printf("Successfully sent response for %s %s:%s", book, chapter, verse)
 	}
 }
 
-func getAvailableBooks() ([]string, error) {
-	rows, err := db.Query("SELECT DISTINCT book FROM verses ORDER BY book")
+func handleBooksRequest(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Received books request from %s", r.RemoteAddr)
+	rows, err := db.Query("SELECT DISTINCT book FROM bible_verses ORDER BY book")
 	if err != nil {
-		return nil, err
+		log.Printf("Database error: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
 	}
 	defer rows.Close()
-
 	var books []string
 	for rows.Next() {
 		var book string
 		if err := rows.Scan(&book); err != nil {
-			return nil, err
+			log.Printf("Error scanning row: %v", err)
+			continue
 		}
 		books = append(books, book)
 	}
-
-	return books, rows.Err()
-}
-
-func displayBook(book string) {
-	fmt.Printf("\n%s\n", book)
-
-	rows, err := db.Query("SELECT chapter, verse, text FROM verses WHERE book = $1 ORDER BY chapter, verse", book)
-	if err != nil {
-		log.Printf("Failed to query verses: %v", err)
-		return
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(books); err != nil {
+		log.Printf("Error encoding books response: %v", err)
+	} else {
+		log.Printf("Successfully sent response with %d books", len(books))
 	}
-	defer rows.Close()
-
-	var currentChapter int
-	for rows.Next() {
-		var chapter int
-		var verse int
-		var text string
-		err := rows.Scan(&chapter, &verse, &text)
-		if err != nil {
-			log.Printf("Failed to scan row: %v", err)
-			continue
-		}
-
-		if chapter != currentChapter {
-			fmt.Printf("\nChapter %d\n", chapter)
-			currentChapter = chapter
-		}
-
-		fmt.Printf("%d%s %s\n", verse, superscript(fmt.Sprintf("%d", verse)), text)
-	}
-
-	if err := rows.Err(); err != nil {
-		log.Printf("Error iterating rows: %v", err)
-	}
-
-	fmt.Println()
-}
-
-func superscript(n string) string {
-	superscriptMap := map[rune]string{
-		'1': "¹", '2': "²", '3': "³", '4': "⁴", '5': "⁵",
-		'6': "⁶", '7': "⁷", '8': "⁸", '9': "⁹", '0': "⁰",
-	}
-	var superscripted strings.Builder
-	for _, char := range n {
-		superscripted.WriteString(superscriptMap[char])
-	}
-	return superscripted.String()
 }

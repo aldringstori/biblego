@@ -1,5 +1,8 @@
 {
   "dependencies": {
-    "@go-ui/core": "^1.37.6"
+    "@go-ui/core": "^1.37.6",
+    "@go-ui/react": "^1.37.6",
+    "axios": "^1.7.7",
+    "react-scripts": "^5.0.1"
   }
 }
