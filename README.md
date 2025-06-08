@@ -1,1 +1,1 @@
-God is our savior
+God is our savior.
